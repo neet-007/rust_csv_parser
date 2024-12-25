@@ -55,6 +55,7 @@ pub struct CsvParser<R: Read> {
     reader: io::BufReader<R>,
     record_field_count: u64,
     line: u64,
+    peek: Option<char>,
     has_header: bool,
     trim_space: bool,
     all_whitespace_empty: bool,
@@ -62,15 +63,18 @@ pub struct CsvParser<R: Read> {
 
 impl<R: Read> CsvParser<R> {
     pub fn new(reader: R) -> Self {
-        CsvParser {
+        let mut ret = CsvParser {
             tokens: Vec::<Token>::new(),
             reader: io::BufReader::new(reader),
             record_field_count: 0,
             line: 1,
+            peek: None,
             has_header: true,
             trim_space: false,
             all_whitespace_empty: false,
-        }
+        };
+        ret.next_char();
+        ret
     }
 
     pub fn with_header(mut self, flag: bool) -> Self {
@@ -88,7 +92,7 @@ impl<R: Read> CsvParser<R> {
         self
     }
 
-    fn next_char(&mut self) -> io::Result<Option<char>> {
+    fn next_char_(&mut self) -> io::Result<Option<char>> {
         let mut buffer = [0u8; 1];
 
         match self.reader.read_exact(&mut buffer) {
@@ -120,7 +124,17 @@ impl<R: Read> CsvParser<R> {
         }
     }
 
-    fn a(&mut self, record: &mut Vec<String>) -> io::Result<()> {
+    fn next_char(&mut self) -> io::Result<Option<char>> {
+        let ret = self.peek;
+        match self.next_char_() {
+            Ok(c) => self.peek = c,
+            Err(err) => return Err(err),
+        }
+
+        return Ok(ret);
+    }
+
+    fn check_record_end(&mut self, record: &mut Vec<String>) -> io::Result<()> {
         if self.line == 1 {
             self.record_field_count = record.len() as u64;
         } else if record.len() as u64 != self.record_field_count {
@@ -143,53 +157,136 @@ impl<R: Read> CsvParser<R> {
         return Ok(());
     }
 
-    fn parse_escaped(&mut self) -> io::Result<(String, bool)> {
-        Ok(("".to_string(), true))
+    fn match_char(&mut self, c: io::Result<Option<char>>, curr: &mut String) -> io::Result<bool> {
+        match c {
+            Ok(Some(c)) => match c {
+                ',' => {
+                    if self.all_whitespace_empty && curr.trim().is_empty() {
+                        *curr = String::from("");
+                    } else {
+                        if self.trim_space {
+                            *curr = curr.trim().to_owned().clone();
+                        } else {
+                            *curr = curr.clone();
+                        }
+                    }
+                    return Ok(true);
+                }
+                '"' => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("at line {:?} found invalid char {c}", self.line),
+                    ))
+                }
+                '\r' | '\n' => {
+                    if self.all_whitespace_empty && curr.trim().is_empty() {
+                        *curr = String::from("");
+                    } else {
+                        if self.trim_space {
+                            *curr = curr.trim().to_owned().clone();
+                        } else {
+                            *curr = curr.clone();
+                        }
+                    }
+                    return Ok(true);
+                }
+                _ => {
+                    curr.push(c);
+                    return Ok(false);
+                }
+            },
+            Ok(None) => return Ok(false),
+            Err(err) => return Err(err),
+        }
     }
 
-    fn parse_field(&mut self, first: char) -> io::Result<(String, bool)> {
+    fn parse_escaped(&mut self) -> io::Result<(String, bool)> {
+        let mut curr = String::new();
+        let mut count = 0;
+
+        loop {
+            match self.next_char() {
+                Ok(Some(c)) => {
+                    match c {
+                        '"' => {
+                            count += 1;
+                            match self.peek {
+                                Some(peek) => match peek {
+                                    '"' => {
+                                        count += 1;
+                                        curr.push('"')
+                                    }
+                                    ',' => {
+                                        if count % 2 != 0 {
+                                            return Err(io::Error::new(
+                                                io::ErrorKind::InvalidData,
+                                                format!(
+                                                    "at line {:?} unterninated escaped \"",
+                                                    self.line
+                                                ),
+                                            ));
+                                        }
+                                        return Ok((curr, false));
+                                    }
+                                    '\r' | '\n' => {
+                                        if count % 2 != 0 {
+                                            return Err(io::Error::new(
+                                                io::ErrorKind::InvalidData,
+                                                format!(
+                                                    "at line {:?} unterninated escaped \"",
+                                                    self.line
+                                                ),
+                                            ));
+                                        }
+                                        return Ok((curr, true));
+                                    }
+                                    _ => {
+                                        return Err(io::Error::new(
+                                            io::ErrorKind::InvalidData,
+                                            format!(
+                                                "at line {:?} unterninated escaped \"",
+                                                self.line
+                                            ),
+                                        ))
+                                    }
+                                },
+                                None => {
+                                    if count % 2 != 0 {
+                                        return Err(io::Error::new(
+                                            io::ErrorKind::InvalidData,
+                                            format!(
+                                                "at line {:?} unterninated escaped \"",
+                                                self.line
+                                            ),
+                                        ));
+                                    }
+                                    return Ok((curr, true));
+                                }
+                            }
+                        }
+                        _ => curr.push(c),
+                    };
+                }
+                Ok(None) => return Ok((curr, true)),
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok((curr, true))
+    }
+
+    fn parse_field(&mut self, first: char) -> io::Result<(String, Option<char>)> {
         let mut curr = String::new();
         curr.push(first);
         loop {
-            match self.next_char() {
-                Ok(Some(c)) => match c {
-                    ',' => {
-                        if self.all_whitespace_empty && curr.trim().is_empty() {
-                            curr = String::from("");
-                        } else {
-                            if self.trim_space {
-                                curr = curr.trim().to_owned().clone();
-                            } else {
-                                curr = curr.clone();
-                            }
-                        }
-                        println!("field: {curr:?}");
-                        return Ok((curr, false));
-                    }
-                    '"' => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("at line {:?} found invalid char {c}", self.line),
-                        ))
-                    }
-                    '\r' | '\n' => {
-                        if self.all_whitespace_empty && curr.trim().is_empty() {
-                            curr = String::from("");
-                        } else {
-                            if self.trim_space {
-                                curr = curr.trim().to_owned().clone();
-                            } else {
-                                curr = curr.clone();
-                            }
-                        }
-                        return Ok((curr, true));
-                    }
-                    _ => curr.push(c),
-                },
-                Ok(None) => {
-                    return Ok((curr, true));
-                }
+            let c = self.next_char();
+            let ret_c = match c {
+                Ok(c) => c,
                 Err(err) => return Err(err),
+            };
+            let finshed = self.match_char(c, &mut curr)?;
+            if finshed {
+                return Ok((curr, ret_c));
             }
         }
     }
@@ -198,13 +295,13 @@ impl<R: Read> CsvParser<R> {
         let mut record = Vec::<String>::new();
         match first {
             '\n' | '\r' => {
-                self.a(&mut record);
+                self.check_record_end(&mut record);
             }
             '"' => match self.parse_escaped() {
                 Ok(res) => {
                     record.push(res.0);
                     if res.1 {
-                        return self.a(&mut record);
+                        return self.check_record_end(&mut record);
                     }
                 }
                 Err(err) => return Err(err),
@@ -212,8 +309,28 @@ impl<R: Read> CsvParser<R> {
             _ => match self.parse_field(first) {
                 Ok(res) => {
                     record.push(res.0);
-                    if res.1 {
-                        return self.a(&mut record);
+                    match res.1 {
+                        Some(c) => match c {
+                            ',' => match self.peek {
+                                Some(peek) => {
+                                    if peek == '\r' || peek == '\n' {
+                                        record.push(String::from(""));
+                                        return self.check_record_end(&mut record);
+                                    }
+                                }
+                                None => {
+                                    record.push(String::from(""));
+                                    return self.check_record_end(&mut record);
+                                }
+                            },
+                            '\r' | '\n' => {
+                                return self.check_record_end(&mut record);
+                            }
+                            _ => {}
+                        },
+                        None => {
+                            return self.check_record_end(&mut record);
+                        }
                     }
                 }
                 Err(err) => return Err(err),
@@ -223,13 +340,13 @@ impl<R: Read> CsvParser<R> {
             match self.next_char() {
                 Ok(Some(c)) => match c {
                     '\n' | '\r' => {
-                        self.a(&mut record);
+                        self.check_record_end(&mut record);
                     }
                     '"' => match self.parse_escaped() {
                         Ok(res) => {
                             record.push(res.0);
                             if res.1 {
-                                return self.a(&mut record);
+                                return self.check_record_end(&mut record);
                             }
                         }
                         Err(err) => return Err(err),
@@ -237,8 +354,28 @@ impl<R: Read> CsvParser<R> {
                     _ => match self.parse_field(c) {
                         Ok(res) => {
                             record.push(res.0);
-                            if res.1 {
-                                return self.a(&mut record);
+                            match res.1 {
+                                Some(c) => match c {
+                                    ',' => match self.peek {
+                                        Some(peek) => {
+                                            if peek == '\r' || peek == '\n' {
+                                                record.push(String::from(""));
+                                                return self.check_record_end(&mut record);
+                                            }
+                                        }
+                                        None => {
+                                            record.push(String::from(""));
+                                            return self.check_record_end(&mut record);
+                                        }
+                                    },
+                                    '\r' | '\n' => {
+                                        return self.check_record_end(&mut record);
+                                    }
+                                    _ => {}
+                                },
+                                None => {
+                                    return self.check_record_end(&mut record);
+                                }
                             }
                         }
                         Err(err) => return Err(err),
@@ -328,6 +465,7 @@ mod tests {
             Err(err) => panic!("{err:?}"),
         };
 
+        println!("token: {tokens:?}");
         for (token, exp) in tokens.iter().zip(expect) {
             assert_eq!(token.value, exp);
         }
