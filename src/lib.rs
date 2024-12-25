@@ -23,6 +23,19 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
+use clap::builder::Str;
+
+#[derive(Debug)]
+struct CsvEndLineError {}
+
+impl std::fmt::Display for CsvEndLineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "end of line",)
+    }
+}
+
+impl std::error::Error for CsvEndLineError {}
+
 #[derive(Debug, Clone)]
 enum TokenType {
     Record,
@@ -107,59 +120,129 @@ impl<R: Read> CsvParser<R> {
         }
     }
 
-    fn parse_escaped(&mut self) {}
+    fn a(&mut self, record: &mut Vec<String>) -> io::Result<()> {
+        if self.line == 1 {
+            self.record_field_count = record.len() as u64;
+        } else if record.len() as u64 != self.record_field_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "at line {:?} expect file to have {:?} fields found {:?}",
+                    self.line,
+                    self.record_field_count,
+                    record.len()
+                ),
+            ));
+        }
+        self.tokens.push(Token {
+            token_type: TokenType::Record,
+            value: record.clone(),
+            line: self.line,
+        });
+        self.line += 1;
+        return Ok(());
+    }
 
-    fn parse_record(&mut self, first: char) -> io::Result<()> {
+    fn parse_escaped(&mut self) -> io::Result<(String, bool)> {
+        Ok(("".to_string(), true))
+    }
+
+    fn parse_field(&mut self, first: char) -> io::Result<(String, bool)> {
         let mut curr = String::new();
         curr.push(first);
-        let mut record = Vec::<String>::new();
         loop {
             match self.next_char() {
                 Ok(Some(c)) => match c {
                     ',' => {
                         if self.all_whitespace_empty && curr.trim().is_empty() {
-                            record.push(String::from(""));
+                            curr = String::from("");
                         } else {
                             if self.trim_space {
-                                record.push(curr.trim().to_owned().clone());
+                                curr = curr.trim().to_owned().clone();
                             } else {
-                                record.push(curr.clone());
+                                curr = curr.clone();
                             }
                         }
-                        curr.clear();
+                        println!("field: {curr:?}");
+                        return Ok((curr, false));
+                    }
+                    '"' => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("at line {:?} found invalid char {c}", self.line),
+                        ))
                     }
                     '\r' | '\n' => {
                         if self.all_whitespace_empty && curr.trim().is_empty() {
-                            record.push(String::from(""));
+                            curr = String::from("");
                         } else {
                             if self.trim_space {
-                                record.push(curr.trim().to_owned().clone());
+                                curr = curr.trim().to_owned().clone();
                             } else {
-                                record.push(curr.clone());
+                                curr = curr.clone();
                             }
                         }
-                        if self.line == 1 {
-                            self.record_field_count = record.len() as u64;
-                        } else if record.len() as u64 != self.record_field_count {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!(
-                                    "at line {:?} expect file to have {:?} fields found {:?}",
-                                    self.line,
-                                    self.record_field_count,
-                                    record.len()
-                                ),
-                            ));
-                        }
-                        self.tokens.push(Token {
-                            token_type: TokenType::Record,
-                            value: record.clone(),
-                            line: self.line,
-                        });
-                        self.line += 1;
-                        return Ok(());
+                        return Ok((curr, true));
                     }
                     _ => curr.push(c),
+                },
+                Ok(None) => {
+                    return Ok((curr, true));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn parse_record(&mut self, first: char) -> io::Result<()> {
+        let mut record = Vec::<String>::new();
+        match first {
+            '\n' | '\r' => {
+                self.a(&mut record);
+            }
+            '"' => match self.parse_escaped() {
+                Ok(res) => {
+                    record.push(res.0);
+                    if res.1 {
+                        return self.a(&mut record);
+                    }
+                }
+                Err(err) => return Err(err),
+            },
+            _ => match self.parse_field(first) {
+                Ok(res) => {
+                    record.push(res.0);
+                    if res.1 {
+                        return self.a(&mut record);
+                    }
+                }
+                Err(err) => return Err(err),
+            },
+        }
+        loop {
+            match self.next_char() {
+                Ok(Some(c)) => match c {
+                    '\n' | '\r' => {
+                        self.a(&mut record);
+                    }
+                    '"' => match self.parse_escaped() {
+                        Ok(res) => {
+                            record.push(res.0);
+                            if res.1 {
+                                return self.a(&mut record);
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    },
+                    _ => match self.parse_field(c) {
+                        Ok(res) => {
+                            record.push(res.0);
+                            if res.1 {
+                                return self.a(&mut record);
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    },
                 },
                 Ok(None) => return Ok(()),
                 Err(err) => return Err(err),
@@ -170,10 +253,7 @@ impl<R: Read> CsvParser<R> {
     pub fn scan(&mut self) -> io::Result<Vec<Token>> {
         loop {
             match self.next_char() {
-                Ok(Some(c)) => match c {
-                    '"' => self.parse_escaped(),
-                    _ => self.parse_record(c)?,
-                },
+                Ok(Some(c)) => self.parse_record(c)?,
                 Ok(None) => return Ok(self.tokens.clone()),
                 Err(err) => return Err(err),
             };
