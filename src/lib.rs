@@ -93,34 +93,34 @@ impl<R: Read> CsvParser<R> {
     }
 
     fn next_char_(&mut self) -> io::Result<Option<char>> {
-        let mut buffer = [0u8; 1];
+        let mut buf = [0u8; 4];
+        let mut len = 0;
 
-        match self.reader.read_exact(&mut buffer) {
-            Ok(()) => {
-                let byte = buffer[0];
-                if byte <= 0x7F {
-                    return Ok(Some(byte as char));
-                }
+        match self.reader.read(&mut buf[0..1]) {
+            Ok(0) => return Ok(None),
+            Ok(_) => len += 1,
+            Err(e) => return Err(e),
+        }
 
-                let mut utf8_buffer = vec![byte];
-                while utf8_buffer.len() < 4 {
-                    match self.reader.read_exact(&mut buffer) {
-                        Ok(()) => {
-                            utf8_buffer.push(buffer[0]);
-                            if let Ok(decoded) = String::from_utf8(utf8_buffer.clone()) {
-                                return Ok(Some(decoded.chars().next().unwrap()));
-                            }
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                            return Ok(None);
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                Ok(None)
+        let utf8_len = match buf[0] {
+            0x00..=0x7F => 1,
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8")),
+        };
+
+        while len < utf8_len {
+            match self.reader.read(&mut buf[len..len + 1]) {
+                Ok(0) => break,
+                Ok(_) => len += 1,
+                Err(e) => return Err(e),
             }
-            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(e) => Err(e),
+        }
+
+        match std::str::from_utf8(&buf[0..len]) {
+            Ok(s) => Ok(s.chars().next()),
+            Err(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8")),
         }
     }
 
@@ -202,7 +202,7 @@ impl<R: Read> CsvParser<R> {
 
     fn parse_escaped(&mut self) -> io::Result<(String, bool)> {
         let mut curr = String::new();
-        let mut count = 0;
+        let mut count = 1;
 
         loop {
             match self.next_char() {
@@ -214,9 +214,11 @@ impl<R: Read> CsvParser<R> {
                                 Some(peek) => match peek {
                                     '"' => {
                                         count += 1;
-                                        curr.push('"')
+                                        curr.push('"');
+                                        self.next_char();
                                     }
                                     ',' => {
+                                        println!("count {count} c {c} 1");
                                         if count % 2 != 0 {
                                             return Err(io::Error::new(
                                                 io::ErrorKind::InvalidData,
@@ -226,9 +228,11 @@ impl<R: Read> CsvParser<R> {
                                                 ),
                                             ));
                                         }
+                                        self.next_char();
                                         return Ok((curr, false));
                                     }
                                     '\r' | '\n' => {
+                                        println!("count {count} c {c} 2");
                                         if count % 2 != 0 {
                                             return Err(io::Error::new(
                                                 io::ErrorKind::InvalidData,
@@ -241,16 +245,18 @@ impl<R: Read> CsvParser<R> {
                                         return Ok((curr, true));
                                     }
                                     _ => {
+                                        println!("count {count} c {c} peek {peek} 3");
                                         return Err(io::Error::new(
                                             io::ErrorKind::InvalidData,
                                             format!(
                                                 "at line {:?} unterninated escaped \"",
                                                 self.line
                                             ),
-                                        ))
+                                        ));
                                     }
                                 },
                                 None => {
+                                    println!("count {count} c {c} 4");
                                     if count % 2 != 0 {
                                         return Err(io::Error::new(
                                             io::ErrorKind::InvalidData,
@@ -277,7 +283,10 @@ impl<R: Read> CsvParser<R> {
 
     fn parse_field(&mut self, first: char) -> io::Result<(String, Option<char>)> {
         let mut curr = String::new();
-        curr.push(first);
+        let finshed = self.match_char(Ok(Some(first)), &mut curr)?;
+        if finshed {
+            return Ok((curr, Some(first)));
+        }
         loop {
             let c = self.next_char();
             let ret_c = match c {
@@ -432,210 +441,4 @@ impl CsvParser<io::Cursor<String>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parser_base() {
-        let expect: Vec<Vec<String>> = vec![
-            vec![String::from("1"), String::from("2"), String::from("3")],
-            vec![String::from("a"), String::from("b"), String::from("c")],
-        ];
-
-        let str = expect.iter().fold(String::new(), |mut str, row| {
-            str.push_str(
-                row.iter()
-                    .enumerate()
-                    .fold(String::new(), |mut inner_str, (i, field)| {
-                        inner_str.push_str(field.as_str());
-                        if i < row.len() - 1 {
-                            inner_str.push(',');
-                        }
-                        inner_str
-                    })
-                    .as_str(),
-            );
-            str.push('\r');
-            str
-        });
-        let mut parser = CsvParser::from_string(str);
-
-        let tokens = match parser.parse() {
-            Ok(tokens) => tokens,
-            Err(err) => panic!("{err:?}"),
-        };
-
-        println!("token: {tokens:?}");
-        for (token, exp) in tokens.iter().zip(expect) {
-            assert_eq!(token.value, exp);
-        }
-    }
-
-    #[test]
-    fn parser_trim_fail() {
-        let expect: Vec<Vec<String>> = vec![
-            vec![String::from("1 "), String::from("2 "), String::from("3")],
-            vec![String::from("a"), String::from("b "), String::from("c")],
-        ];
-
-        let str = expect.iter().fold(String::new(), |mut str, row| {
-            str.push_str(
-                row.iter()
-                    .enumerate()
-                    .fold(String::new(), |mut inner_str, (i, field)| {
-                        inner_str.push_str(field.as_str());
-                        if i < row.len() - 1 {
-                            inner_str.push(',');
-                        }
-                        inner_str
-                    })
-                    .as_str(),
-            );
-            str.push('\r');
-            str
-        });
-        let mut parser = CsvParser::from_string(str);
-
-        let tokens = match parser.parse() {
-            Ok(tokens) => tokens,
-            Err(err) => panic!("{err:?}"),
-        };
-
-        for (token, exp) in tokens.iter().zip(expect) {
-            let trimmed_exp = exp
-                .iter()
-                .map(|x| x.trim().to_owned())
-                .collect::<Vec<String>>();
-            assert_ne!(token.value, trimmed_exp);
-        }
-    }
-
-    #[test]
-    fn parser_trim() {
-        let expect: Vec<Vec<String>> = vec![
-            vec![String::from("1 "), String::from("2 "), String::from("3")],
-            vec![String::from("a"), String::from("b "), String::from("c")],
-        ];
-
-        let str = expect.iter().fold(String::new(), |mut str, row| {
-            str.push_str(
-                row.iter()
-                    .enumerate()
-                    .fold(String::new(), |mut inner_str, (i, field)| {
-                        inner_str.push_str(field.as_str());
-                        if i < row.len() - 1 {
-                            inner_str.push(',');
-                        }
-                        inner_str
-                    })
-                    .as_str(),
-            );
-            str.push('\r');
-            str
-        });
-        let mut parser = CsvParser::from_string(str).trim_space(true);
-
-        let tokens = match parser.parse() {
-            Ok(tokens) => tokens,
-            Err(err) => panic!("{err:?}"),
-        };
-
-        for (token, exp) in tokens.iter().zip(expect) {
-            let trimmed_exp = exp
-                .iter()
-                .map(|x| x.trim().to_owned())
-                .collect::<Vec<String>>();
-            assert_eq!(token.value, trimmed_exp);
-        }
-    }
-
-    #[test]
-    fn parser_all_whitespace_fail() {
-        let expect: Vec<Vec<String>> = vec![
-            vec![String::from("1 "), String::from("  "), String::from("3")],
-            vec![String::from("a"), String::from(" "), String::from("")],
-        ];
-
-        let str = expect.iter().fold(String::new(), |mut str, row| {
-            str.push_str(
-                row.iter()
-                    .enumerate()
-                    .fold(String::new(), |mut inner_str, (i, field)| {
-                        inner_str.push_str(field.as_str());
-                        if i < row.len() - 1 {
-                            inner_str.push(',');
-                        }
-                        inner_str
-                    })
-                    .as_str(),
-            );
-            str.push('\r');
-            str
-        });
-        let mut parser = CsvParser::from_string(str);
-
-        let tokens = match parser.parse() {
-            Ok(tokens) => tokens,
-            Err(err) => panic!("{err:?}"),
-        };
-
-        for (token, exp) in tokens.iter().zip(expect) {
-            let trimmed_exp = exp
-                .iter()
-                .map(|x| {
-                    if x.trim().is_empty() {
-                        x.trim().to_owned()
-                    } else {
-                        x.to_string()
-                    }
-                })
-                .collect::<Vec<String>>();
-            assert_ne!(token.value, trimmed_exp);
-        }
-    }
-
-    #[test]
-    fn parser_all_whitespace() {
-        let expect: Vec<Vec<String>> = vec![
-            vec![String::from("1 "), String::from("  "), String::from("3")],
-            vec![String::from("a"), String::from(" "), String::from("")],
-        ];
-
-        let str = expect.iter().fold(String::new(), |mut str, row| {
-            str.push_str(
-                row.iter()
-                    .enumerate()
-                    .fold(String::new(), |mut inner_str, (i, field)| {
-                        inner_str.push_str(field.as_str());
-                        if i < row.len() - 1 {
-                            inner_str.push(',');
-                        }
-                        inner_str
-                    })
-                    .as_str(),
-            );
-            str.push('\r');
-            str
-        });
-        let mut parser = CsvParser::from_string(str).all_whitespace_empty(true);
-
-        let tokens = match parser.parse() {
-            Ok(tokens) => tokens,
-            Err(err) => panic!("{err:?}"),
-        };
-
-        for (token, exp) in tokens.iter().zip(expect) {
-            let trimmed_exp = exp
-                .iter()
-                .map(|x| {
-                    if x.trim().is_empty() {
-                        x.trim().to_owned()
-                    } else {
-                        x.to_string()
-                    }
-                })
-                .collect::<Vec<String>>();
-            assert_eq!(token.value, trimmed_exp);
-        }
-    }
-}
+mod tests;
