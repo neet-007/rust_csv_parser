@@ -23,19 +23,6 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
-use clap::builder::Str;
-
-#[derive(Debug)]
-struct CsvEndLineError {}
-
-impl std::fmt::Display for CsvEndLineError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "end of line",)
-    }
-}
-
-impl std::error::Error for CsvEndLineError {}
-
 #[derive(Debug, Clone)]
 enum TokenType {
     Record,
