@@ -7,6 +7,11 @@ this is my first attempt to write a parser in rust and my
 first project outside the rust book and advent of code it parses   
 the csv according to this [rfc](https://www.ietf.org/rfc/rfc4180.txt).
 
+## Flags
+- path: path to the csv   
+- trimmer: to make the parser trim all whitespace   
+- whitespace_empty: to make the parser trim empty field that have only whitespace
+
 ## Examples
 
 the program is a cli that follows this
