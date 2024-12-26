@@ -9,6 +9,19 @@ struct Cli {
 fn main() {
     let args = Cli::parse();
 
+    parse_from_file(&args);
+
+    let str = "\"field, with, commas\",2,3";
+    let mut parser = rust_csv_parser::CsvParser::from_string(str.to_string());
+    let tokens = match parser.parse() {
+        Ok(tokens) => tokens,
+        Err(err) => panic!("{err:?}"),
+    };
+
+    println!("tokens:\n{tokens:?}");
+}
+
+fn parse_from_file(args: &Cli) {
     let mut parser = match rust_csv_parser::CsvParser::from_path(&args.path) {
         Ok(p) => p,
         Err(err) => panic!("{err:?}"),

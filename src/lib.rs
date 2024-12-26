@@ -176,7 +176,7 @@ impl<R: Read> CsvParser<R> {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("at line {:?} found invalid char {c}", self.line),
-                    ))
+                    ));
                 }
                 '\r' | '\n' => {
                     if self.all_whitespace_empty && curr.trim().is_empty() {
@@ -195,7 +195,9 @@ impl<R: Read> CsvParser<R> {
                     return Ok(false);
                 }
             },
-            Ok(None) => return Ok(false),
+            Ok(None) => {
+                return Ok(true);
+            }
             Err(err) => return Err(err),
         }
     }
@@ -218,7 +220,6 @@ impl<R: Read> CsvParser<R> {
                                         self.next_char();
                                     }
                                     ',' => {
-                                        println!("count {count} c {c} 1");
                                         if count % 2 != 0 {
                                             return Err(io::Error::new(
                                                 io::ErrorKind::InvalidData,
@@ -232,7 +233,6 @@ impl<R: Read> CsvParser<R> {
                                         return Ok((curr, false));
                                     }
                                     '\r' | '\n' => {
-                                        println!("count {count} c {c} 2");
                                         if count % 2 != 0 {
                                             return Err(io::Error::new(
                                                 io::ErrorKind::InvalidData,
@@ -245,7 +245,6 @@ impl<R: Read> CsvParser<R> {
                                         return Ok((curr, true));
                                     }
                                     _ => {
-                                        println!("count {count} c {c} peek {peek} 3");
                                         return Err(io::Error::new(
                                             io::ErrorKind::InvalidData,
                                             format!(
@@ -256,7 +255,6 @@ impl<R: Read> CsvParser<R> {
                                     }
                                 },
                                 None => {
-                                    println!("count {count} c {c} 4");
                                     if count % 2 != 0 {
                                         return Err(io::Error::new(
                                             io::ErrorKind::InvalidData,
@@ -270,7 +268,9 @@ impl<R: Read> CsvParser<R> {
                                 }
                             }
                         }
-                        _ => curr.push(c),
+                        _ => {
+                            curr.push(c);
+                        }
                     };
                 }
                 Ok(None) => return Ok((curr, true)),

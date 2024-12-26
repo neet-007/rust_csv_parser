@@ -416,7 +416,6 @@ fn parser_trailing_newline() {
     assert_eq!(tokens[1].value, vec!["4", "5", "6"]);
 }
 
-/*
 #[test]
 fn parser_quoted_fields_with_commas() {
     let str = "\"field, with, commas\",2,3";
@@ -467,4 +466,3 @@ fn parser_escaped_quotes() {
         vec!["field with \"escaped quotes\"", "2", "3"]
     );
 }
-*/
